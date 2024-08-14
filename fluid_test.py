@@ -38,9 +38,9 @@ cv2.namedWindow('p',cv2.WINDOW_NORMAL)
 
 if save_movie:
 	fourcc = cv2.VideoWriter_fourcc(*'MJPG')
-	movie_p = cv2.VideoWriter(f'plots/p_{get_hyperparam_fluid(params)}.avi', fourcc, movie_FPS, ((params.height-2)*resolution_factor,(params.width-2)*resolution_factor))
-	movie_v = cv2.VideoWriter(f'plots/v_{get_hyperparam_fluid(params)}.avi', fourcc, movie_FPS, ((params.height-2)*resolution_factor,(params.width-2)*resolution_factor))
-	movie_a = cv2.VideoWriter(f'plots/a_{get_hyperparam_fluid(params)}.avi', fourcc, movie_FPS, ((params.height-2)*resolution_factor,(params.width-2)*resolution_factor))
+	movie_p = cv2.VideoWriter(f'plots/p_{get_hyperparam_fluid(params)}.avi', fourcc, movie_FPS, (params.width-2)*resolution_factor, ((params.height-2)*resolution_factor))
+	movie_v = cv2.VideoWriter(f'plots/v_{get_hyperparam_fluid(params)}.avi', fourcc, movie_FPS, (params.width-2)*resolution_factor, ((params.height-2)*resolution_factor))
+	movie_a = cv2.VideoWriter(f'plots/a_{get_hyperparam_fluid(params)}.avi', fourcc, movie_FPS, (params.width-2)*resolution_factor, ((params.height-2)*resolution_factor))
 
 def mousePosition(event,x,y,flags,param):
 	global dataset
@@ -148,15 +148,15 @@ while not exit_loop:
 			image /= torch.max(image)
 			image = toCpu(image).unsqueeze(2).repeat(1,1,3).numpy()
 			if save_movie:
-				movie_a.write((255*image).astype(np.uint8))
-			cv2.imshow('a_z',image)
+				movie_a.write(np.transpose((255*image).astype(np.uint8)))
+			cv2.imshow('a_z', np.transpose(image, (1,0,2)))
 			
 			vector = v[0,:,resolution_factor:-resolution_factor,resolution_factor:-resolution_factor].cpu().detach().clone()
 			image = vector2HSV(vector)
 			image = cv2.cvtColor(image,cv2.COLOR_HSV2BGR)
 			if save_movie:
-				movie_v.write((255*image).astype(np.uint8))
-			cv2.imshow('v',image)
+				movie_v.write(np.transpose((255*image).astype(np.uint8)))
+			cv2.imshow('v', np.transpose(image, (1, 0, 2)))
 			
 			# obtain interpolated field values for p,grad_p from spline coefficients of pressure field
 			p,grad_p = superres_2d_pressure(new_hidden_state[0:1,v_size:],orders_p,resolution_factor)
@@ -166,8 +166,8 @@ while not exit_loop:
 			image /= torch.max(image)
 			image = toCpu(image).unsqueeze(2).repeat(1,1,3).numpy()
 			if save_movie:
-				movie_p.write((255*image).astype(np.uint8))
-			cv2.imshow('p',image)
+				movie_p.write(np.transpose((255*image).astype(np.uint8)))
+			cv2.imshow('p', np.transpose(image, (1,0,2)))
 			
 			key = cv2.waitKey(1)
 			

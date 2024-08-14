@@ -60,8 +60,8 @@ def params():
 	parser.add_argument('--damping', default=0.1, type=float, help='damping coefficient for wave equation')
 	
 	# Domain parameters
-	parser.add_argument('--width', default=None, type=int, help='domain width')
-	parser.add_argument('--height', default=None, type=int, help='domain height')
+	parser.add_argument('--width', default=300, type=int, help='domain width')
+	parser.add_argument('--height', default=100, type=int, help='domain height')
 	parser.add_argument('--max_speed', default=1, type=float, help='max speed for boundary conditions in dataset (default: 1)')
 	
 	# Logger / Load parameters
