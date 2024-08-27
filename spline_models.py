@@ -7,9 +7,9 @@ from unet_parts import *
 import numpy as np
 import os,pickle
 
-def get_Net(params):
+def get_Net(params, forcing=False):
 	if params.net == "Fluid_model":
-		net = fluid_model(orders_v=[params.orders_v,params.orders_v],orders_p=[params.orders_p,params.orders_p],hidden_size=params.hidden_size,input_size=3)
+		net = fluid_model(orders_v=[params.orders_v,params.orders_v],orders_p=[params.orders_p,params.orders_p],hidden_size=params.hidden_size,input_size=3, forcing=forcing)
 	elif params.net == "Wave_model":
 		params.orders_p = params.orders_v = params.orders_z
 		net = wave_model(orders_v=[params.orders_v,params.orders_v],orders_p=[params.orders_p,params.orders_p],hidden_size=params.hidden_size,input_size=2,residuals=True)
@@ -18,7 +18,7 @@ def get_Net(params):
 class fluid_model(nn.Module):
 	# inspired by UNet taken from: https://github.com/milesial/Pytorch-UNet/blob/master/unet/unet_model.py
 	
-	def __init__(self, orders_v,orders_p,hidden_size=64,interpolation_size=5, bilinear=True,input_size=3,residuals=False):
+	def __init__(self, orders_v,orders_p,hidden_size=64,interpolation_size=5, bilinear=True,input_size=3,residuals=False,forcing=False):
 		"""
 		:orders_v: order of spline for velocity potential (should be at least 2)
 		:orders_p: order of spline for pressure field
@@ -36,7 +36,11 @@ class fluid_model(nn.Module):
 		self.p_size = np.prod([i+1 for i in orders_p])
 		self.hidden_state_size = self.v_size + self.p_size
 		self.residuals = residuals
-		
+		self.forcing = forcing
+  
+		if self.forcing:
+			input_size += 2
+   
 		self.interpol = nn.Conv2d(input_size,interpolation_size,kernel_size=2) # interpolate v_cond (2) and v_mask (1) from 4 surrounding fields
 		self.inc = DoubleConv(self.hidden_state_size+interpolation_size, hidden_size) # input: hidden_state + interpolation of v_cond and v_mask
 		self.down1 = Down(hidden_size, 2*hidden_size)
@@ -54,14 +58,18 @@ class fluid_model(nn.Module):
 		self.output_scaler[:,(self.v_size):(self.v_size+1),:,:] = 400
 		
 	
-	def forward(self,hidden_state,v_cond,v_mask):
+	def forward(self,hidden_state,v_cond,v_mask,v_obs=None):
 		"""
 		:hidden_state: old hidden state of size: bs x hidden_state_size x (w-1) x (h-1)
 		:v_cond: velocity (dirichlet) conditions on boundaries (average value within cell): bs x 2 x w x h
 		:v_mask: mask for boundary conditions (average value within cell): bs x 1 x w x h
+		:v_obs: velocity observations: bs x 2 x w x h (used only if forcing=True)
 		:return: new hidden state of size: bs x hidden_state_size x (w-1) x (h-1)
 		"""
-		x = torch.cat([v_cond,v_mask],dim=1)
+		if self.forcing:
+			x = torch.cat([v_cond,v_mask,v_obs],dim=1)
+		else:
+			x = torch.cat([v_cond,v_mask],dim=1)
 		
 		x = self.interpol(x)
 		
@@ -275,7 +283,7 @@ except:
 	print("no buffers available")
 
 # interpolate hidden_states
-def interpolate_states(old_hidden_states,new_hidden_states,offset,dt=1,orders_v=[2,2],orders_p=[0,0]):
+def interpolate_states(old_hidden_states,new_hidden_states,offset,dt=1,orders_v=[2,2],orders_p=[0,0], ds=1):
 	"""
 	:old_hidden_states: old hidden states (size: bs x (v_size+p_size) x w x h)
 	:new_hidden_states: new hidden states (size: bs x (v_size+p_size) x w x h)
@@ -294,11 +302,11 @@ def interpolate_states(old_hidden_states,new_hidden_states,offset,dt=1,orders_v=
 	"""
 	v_size = np.prod([i+1 for i in orders_v])
 	
-	old_a_z,old_v,old_grad_v,old_laplace_v = interpolate_2d_velocity(old_hidden_states[:,:v_size],offset[0:2],orders_v)
-	new_a_z,new_v,new_grad_v,new_laplace_v = interpolate_2d_velocity(new_hidden_states[:,:v_size],offset[0:2],orders_v)
+	old_a_z,old_v,old_grad_v,old_laplace_v = interpolate_2d_velocity(old_hidden_states[:,:v_size],offset[0:2],orders_v, ds=ds)
+	new_a_z,new_v,new_grad_v,new_laplace_v = interpolate_2d_velocity(new_hidden_states[:,:v_size],offset[0:2],orders_v, ds=ds)
 	
-	old_p,old_grad_p = interpolate_2d_pressure(old_hidden_states[:,v_size:],offset[0:2],orders_p)
-	new_p,new_grad_p = interpolate_2d_pressure(new_hidden_states[:,v_size:],offset[0:2],orders_p)
+	old_p,old_grad_p = interpolate_2d_pressure(old_hidden_states[:,v_size:],offset[0:2],orders_p, ds=ds)
+	new_p,new_grad_p = interpolate_2d_pressure(new_hidden_states[:,v_size:],offset[0:2],orders_p, ds=ds)
 	
 	# time is interpolated linearly
 	a_z = (1-offset[2])*old_a_z + offset[2]*new_a_z
@@ -381,7 +389,7 @@ def interpolate_wave_states_2(old_hidden_states,new_hidden_states,offset,dt=1,or
 	
 	return z,grad_z,laplace_z,dz_dt,v,a
 
-def superres_states(old_hidden_states,new_hidden_states,offset,dt=1,orders_v=[2,2],orders_p=[0,0],resolution_factor=1):#is not used... => remove
+def superres_states(old_hidden_states,new_hidden_states,offset,dt=1,orders_v=[2,2],orders_p=[0,0],resolution_factor=1, ds=1):#is not used... => remove
 	"""
 	:old_hidden_states: old hidden states (size: bs x (v_size+p_size) x w x h)
 	:new_hidden_states: new hidden states (size: bs x (v_size+p_size) x w x h)
@@ -401,11 +409,11 @@ def superres_states(old_hidden_states,new_hidden_states,offset,dt=1,orders_v=[2,
 	"""
 	v_size = np.prod([i+1 for i in orders_v])
 	
-	old_a_z,old_v,old_grad_v,old_laplace_v = superres_2d_velocity(old_hidden_states[:,:v_size],orders_v,resolution_factor)
-	new_a_z,new_v,new_grad_v,new_laplace_v = superres_2d_velocity(new_hidden_states[:,:v_size],orders_v,resolution_factor)
+	old_a_z,old_v,old_grad_v,old_laplace_v = superres_2d_velocity(old_hidden_states[:,:v_size],orders_v,resolution_factor, ds=ds)
+	new_a_z,new_v,new_grad_v,new_laplace_v = superres_2d_velocity(new_hidden_states[:,:v_size],orders_v,resolution_factor, ds=ds)
 	
-	old_p,old_grad_p = superres_2d_pressure(old_hidden_states[:,v_size:],orders_p,resolution_factor)
-	new_p,new_grad_p = superres_2d_pressure(new_hidden_states[:,v_size:],orders_p,resolution_factor)
+	old_p,old_grad_p = superres_2d_pressure(old_hidden_states[:,v_size:],orders_p,resolution_factor, ds=ds)
+	new_p,new_grad_p = superres_2d_pressure(new_hidden_states[:,v_size:],orders_p,resolution_factor, ds=ds)
 	
 	# time is interpolated linearly
 	a_z = (1-offset)*old_a_z + offset*new_a_z
@@ -419,7 +427,7 @@ def superres_states(old_hidden_states,new_hidden_states,offset,dt=1,orders_v=[2,
 	
 	return a_z,v,dv_dt,grad_v,laplace_v,p,grad_p
 
-def interpolate_2d_velocity(weights,offsets,orders=[2,2]):
+def interpolate_2d_velocity(weights,offsets,orders=[2,2], ds=1):
 	"""
 	Idea: return derivatives of splines directly, implement with convolutions
 	:weights: size: bs x (orders[0]+1) * (orders[1]+1) x w x h
@@ -447,13 +455,13 @@ def interpolate_2d_velocity(weights,offsets,orders=[2,2]):
 				kernels[0:1,0:1,l,m,:,:] = p_multidim(offsets[:,:,l,m],[orders[0],orders[1]],[l,m])
 		
 		# velocity
-		kernels[0:1,1:3,:,:,:,:] = rot(kernels[:,0:1,:,:,:,:],offsets,create_graph=True,retain_graph=True)
+		kernels[0:1,1:3,:,:,:,:] = rot(kernels[:,0:1,:,:,:,:],offsets,create_graph=True,retain_graph=True,ds=ds)
 		# gradients of velocity
-		kernels[0:1,3:5] = grad(kernels[0:1,1:2,:,:,:,:],offsets,create_graph=True,retain_graph=True)
-		kernels[0:1,5:7] = grad(kernels[0:1,2:3,:,:,:,:],offsets,create_graph=True,retain_graph=True)
+		kernels[0:1,3:5] = grad(kernels[0:1,1:2,:,:,:,:],offsets,create_graph=True,retain_graph=True,ds=ds)
+		kernels[0:1,5:7] = grad(kernels[0:1,2:3,:,:,:,:],offsets,create_graph=True,retain_graph=True,ds=ds)
 		# laplace of velocity
-		kernels[0:1,7:8] = div(kernels[0:1,3:5],offsets,retain_graph=True)
-		kernels[0:1,8:9] = div(kernels[0:1,5:7],offsets,retain_graph=False)
+		kernels[0:1,7:8] = div(kernels[0:1,3:5],offsets,retain_graph=True,ds=ds)
+		kernels[0:1,8:9] = div(kernels[0:1,5:7],offsets,retain_graph=False,ds=ds)
 		
 		kernels = kernels.reshape(1,1+2+4+2,(orders[0]+1)*(orders[1]+1),2,2).detach()
 		
@@ -467,7 +475,7 @@ def interpolate_2d_velocity(weights,offsets,orders=[2,2]):
 	return output[:,0:1],output[:,1:3],output[:,3:7],output[:,7:9]
 
 #  superresolution with strided convolution
-def superres_2d_velocity(weights,orders=[2,2],resolution_factor=1):
+def superres_2d_velocity(weights,orders=[2,2],resolution_factor=1,ds=1):
 	res_key = f"{resolution_factor}, orders: {orders}"
 	if res_key in kernel_buffer_velocity_superres.keys():
 		superres_kernels = kernel_buffer_velocity_superres[res_key]
@@ -485,13 +493,13 @@ def superres_2d_velocity(weights,orders=[2,2],resolution_factor=1):
 						kernels[0:1,0:1,l,m,:,:] = p_multidim(offsets[:,:,l,m],[orders[0],orders[1]],[l,m])
 				
 				# velocity
-				kernels[0:1,1:3,:,:,:,:] = rot(kernels[0:1,0:1,:,:,:,:],offsets,create_graph=True,retain_graph=True)
+				kernels[0:1,1:3,:,:,:,:] = rot(kernels[0:1,0:1,:,:,:,:],offsets,create_graph=True,retain_graph=True,ds=ds)
 				# gradients of velocity
-				kernels[0:1,3:5] = grad(kernels[0:1,1:2,:,:,:,:],offsets,create_graph=True,retain_graph=True)
-				kernels[0:1,5:7] = grad(kernels[0:1,2:3,:,:,:,:],offsets,create_graph=True,retain_graph=True)
+				kernels[0:1,3:5] = grad(kernels[0:1,1:2,:,:,:,:],offsets,create_graph=True,retain_graph=True,ds=ds)
+				kernels[0:1,5:7] = grad(kernels[0:1,2:3,:,:,:,:],offsets,create_graph=True,retain_graph=True,ds=ds)
 				# laplace of velocity
-				kernels[0:1,7:8] = div(kernels[0:1,3:5],offsets,retain_graph=True)
-				kernels[0:1,8:9] = div(kernels[0:1,5:7],offsets,retain_graph=False)
+				kernels[0:1,7:8] = div(kernels[0:1,3:5],offsets,retain_graph=True,ds=ds)
+				kernels[0:1,8:9] = div(kernels[0:1,5:7],offsets,retain_graph=False,ds=ds)
 				
 				kernels = kernels.reshape(1,1+2+4+2,(orders[0]+1)*(orders[1]+1),2,2).detach().clone()
 				superres_kernels[:,:,:,i::resolution_factor,j::resolution_factor] = kernels
@@ -505,7 +513,7 @@ def superres_2d_velocity(weights,orders=[2,2],resolution_factor=1):
 	
 	return output[:,0:1],output[:,1:3],output[:,3:7],output[:,7:9]
 
-def interpolate_2d_pressure(weights,offsets,orders=[0,0]):
+def interpolate_2d_pressure(weights,offsets,orders=[0,0],ds=1):
 	"""
 	Idea: return derivatives of splines directly, implement with convolutions
 	:weights: size: bs x (orders[0]+1) * (orders[1]+1) x w x h
@@ -528,7 +536,7 @@ def interpolate_2d_pressure(weights,offsets,orders=[0,0]):
 				kernels[0:1,0:1,l,m,:,:] = p_multidim(offsets[:,:,l,m],[orders[0],orders[1]],[l,m])
 		
 		# grad p
-		kernels[0:1,1:3,:,:,:,:] = grad(kernels[:,0:1,:,:,:,:],offsets,create_graph=True,retain_graph=True)
+		kernels[0:1,1:3,:,:,:,:] = grad(kernels[:,0:1,:,:,:,:],offsets,create_graph=True,retain_graph=True,ds=ds)
 		
 		kernels = kernels.reshape(1,1+2,(orders[0]+1)*(orders[1]+1),2,2).detach()
 		
@@ -541,7 +549,7 @@ def interpolate_2d_pressure(weights,offsets,orders=[0,0]):
 	return output[:,0:1],output[:,1:3]
 
 #  superresolution with strided convolution
-def superres_2d_pressure(weights,orders=[0,0],resolution_factor=1):
+def superres_2d_pressure(weights,orders=[0,0],resolution_factor=1, ds=1):
 	res_key = f"{resolution_factor}, orders: {orders}"
 	if res_key in kernel_buffer_pressure_superres.keys():
 		superres_kernels = kernel_buffer_pressure_superres[res_key]
@@ -559,7 +567,7 @@ def superres_2d_pressure(weights,orders=[0,0],resolution_factor=1):
 						kernels[0:1,0:1,l,m,:,:] = p_multidim(offsets[:,:,l,m],[orders[0],orders[1]],[l,m])
 				
 				# grad p
-				kernels[0:1,1:3,:,:,:,:] = grad(kernels[:,0:1,:,:,:,:],offsets,create_graph=True,retain_graph=True)
+				kernels[0:1,1:3,:,:,:,:] = grad(kernels[:,0:1,:,:,:,:],offsets,create_graph=True,retain_graph=True,ds=ds)
 				
 				kernels = kernels.reshape(1,1+2,(orders[0]+1)*(orders[1]+1),2,2).detach().clone()
 				superres_kernels[:,:,:,i::resolution_factor,j::resolution_factor] = kernels

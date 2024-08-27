@@ -25,18 +25,24 @@ orders_p = [params.orders_p,params.orders_p]
 v_size,p_size = np.prod([i+1 for i in orders_v]),np.prod([i+1 for i in orders_p])
 
 # initialize dataset
-dataset = Dataset(params.width,params.height,hidden_size=v_size+p_size,batch_size=params.batch_size,n_samples=params.n_samples,dataset_size=params.dataset_size,average_sequence_length=params.average_sequence_length,max_speed=params.max_speed,dt=params.dt,types=["DFG_benchmark","box","magnus","ecmo"])#"box","magnus","ecmo"
+dataset = Dataset(params.width,params.height,hidden_size=v_size+p_size,batch_size=params.batch_size,n_samples=params.n_samples,dataset_size=params.dataset_size,average_sequence_length=params.average_sequence_length,max_speed=params.max_speed,dt=params.dt,types=["DFG_benchmark","box","magnus","ecmo"], forcing=True, n_forcing=params.n_forcing)#"box","magnus","ecmo"
 
 # initialize fluid model and optimizer
-model = toCuda(get_Net(params))
+model = toCuda(get_Net(params, forcing=True))
 optimizer = Adam(model.parameters(),lr=params.lr)
 
+logger_pretrained = Logger(get_hyperparam_fluid(params), use_csv=False, use_tensorboard=False)
+pretrained_model = toCuda(get_Net(params, forcing=False))
+date_time, index = logger_pretrained.load_state(pretrained_model, None, datetime=params.load_pretrained_date_time, index=params.load_pretrained_index)
+print(f"loaded pretrained model {params.net}: {date_time}, index: {index}")
+pretrained_model.eval()
+
 # initialize Logger and load model / optimizer if according parameters were given
-logger = Logger(get_hyperparam_fluid(params),use_csv=False,use_tensorboard=params.log)
+logger = Logger(get_hyperparam_fluid(params) + ' with_forcing',use_csv=False,use_tensorboard=params.log)
 logger.save_params_to_file(params)
 
 if params.load_latest or params.load_date_time is not None or params.load_index is not None:
-	load_logger = Logger(get_hyperparam_fluid(params),use_csv=False,use_tensorboard=False)
+	load_logger = Logger(get_hyperparam_fluid(params) + ' with_forcing',use_csv=False,use_tensorboard=False)
 	if params.load_optimizer:
 		params.load_date_time, params.load_index = logger.load_state(model,optimizer,params.load_date_time,params.load_index)
 	else:
@@ -73,15 +79,22 @@ for epoch in range(params.load_index,params.n_epochs):
 	for i in range(params.n_batches_per_epoch):
 		
 		# retrieve batch from training pool
-		v_cond,v_mask,old_hidden_state,offsets,sample_v_conds,sample_v_masks = toCuda(dataset.ask())
+		v_cond,v_mask,old_hidden_state,offsets,sample_v_conds,sample_v_masks,v_obs,v_obs_mask = toCuda(dataset.ask())
 		
 		# predict new hidden state that contains the spline coeffients of the next timestep
-		new_hidden_state = model(old_hidden_state,v_cond,v_mask)
+		new_hidden_state = model(old_hidden_state,v_cond,v_mask,v_obs)
+  
+		with torch.no_grad():
+			new_hidden_state_pretrained = pretrained_model(old_hidden_state,v_cond,v_mask)
 		
 		# compute physics informed loss
 		loss_total = 0
 		loss_domain_total = 0
 		loss_boundary_total = 0
+		loss_diff_total = 0
+  
+		v_obs = torch.zeros_like(v_obs)
+	
 		for j in range(params.n_samples):
 			offset = torch.floor(offsets[j]*resolution_factor)/resolution_factor
 			sample_v_cond = sample_v_conds[j]
@@ -92,9 +105,14 @@ for epoch in range(params.load_index,params.n_epochs):
 			
 			# interpolate spline coeffients to obtain: a_z, v, dv_dt, grad_v, laplace_v, p, grad_p
 			a_z,v,dv_dt,grad_v,laplace_v,p,grad_p = interpolate_states(old_hidden_state,new_hidden_state,offset,dt=dt,orders_v=orders_v,orders_p=orders_p,ds=ds)
+			_, v_pred, _, _, _, _, _ = interpolate_states(old_hidden_state,new_hidden_state_pretrained,offset,dt=dt,orders_v=orders_v,orders_p=orders_p,ds=ds)
+	
 			
 			# boundary loss
 			loss_boundary = torch.mean(sample_v_mask[:,:,1:-1,1:-1]*(v-sample_v_cond[:,:,1:-1,1:-1])**2,dim=(1,2,3))
+   
+			# observation loss
+			loss_diff = torch.mean(v_obs_mask[:,:,1:-1,1:-1]*(v-v_pred)**2,dim=(1,2,3))
 			
 			# navier stokes loss
 			grad_v_x = grad_v[:,0:2]
@@ -124,39 +142,44 @@ for epoch in range(params.load_index,params.n_epochs):
 			# loss_domain_p = loss_grad_p_x+loss_grad_p_y
 			
 			# Accumulate losses directly
-			loss_total += (params.loss_bound * loss_boundary + params.loss_domain_res * loss_domain_res ) / params.n_samples
+			loss_total += (params.loss_bound * loss_boundary + params.loss_domain_res * loss_domain_res + params.loss_diff * loss_diff) / params.n_samples
 			loss_domain_total += torch.mean(loss_domain_res) / params.n_samples
 			loss_boundary_total += torch.mean(loss_boundary) / params.n_samples
+			loss_diff_total += torch.mean(loss_diff) / params.n_samples
+   
+			v_obs += v_obs_mask.expand(-1, 2, -1, -1) * F.pad(v_pred, (1, 1, 1, 1)) / params.n_samples
 
-		loss_total = torch.mean(torch.log(loss_total))/params.n_samples
-
-		# reset old gradients to 0 and compute new gradients with backpropagation
+		
+		# Compute final loss value for this batch
+		loss_total = torch.mean(torch.log(loss_total))
+  
+		# Reset old gradients to 0 and compute new gradients with backpropagation
 		model.zero_grad()
 		loss_total.backward()
 		
-		# clip gradients
+		# Clip gradients if necessary
 		if params.clip_grad_value is not None:
-			torch.nn.utils.clip_grad_value_(model.parameters(),params.clip_grad_value)
+			torch.nn.utils.clip_grad_value_(model.parameters(), params.clip_grad_value)
 		
 		if params.clip_grad_norm is not None:
-			torch.nn.utils.clip_grad_norm_(model.parameters(),params.clip_grad_norm)
+			torch.nn.utils.clip_grad_norm_(model.parameters(), params.clip_grad_norm)
 		
-		# optimize fluid model
+		# Optimize fluid model
 		optimizer.step()
 		
-		# tell dataset new hidden_state
-		dataset.tell(toCpu(new_hidden_state))
+		# Update dataset with new hidden state
+		dataset.tell(toCpu(new_hidden_state), v_obs=toCpu(v_obs))
 		
 		# Log training metrics
-		print(f"iteration: {i}/{params.n_batches_per_epoch} loss_total: {loss_total.detach().cpu().numpy().item():.6f}, loss_domain: {loss_domain_total.detach().cpu().numpy().item():.6f}, loss_boundary: {loss_boundary_total.detach().cpu().numpy().item():.6f}", end="\r")
+		print(f"iteration: {i}/{params.n_batches_per_epoch} loss_total: {loss_total.detach().cpu().numpy().item():.6f}, loss_domain: {loss_domain_total.detach().cpu().numpy().item():.6f}, loss_boundary: {loss_boundary_total.detach().cpu().numpy().item():.6f}, loss_diff: {loss_diff_total.detach().cpu().numpy().item():.6f}", end="\r")
 		
 		if i % 10 == 0:
 			logger.log(f"loss_total", loss_total.detach().cpu().numpy(), epoch * params.n_batches_per_epoch + i)
 			logger.log(f"loss_domain", loss_domain_total.detach().cpu().numpy(), epoch * params.n_batches_per_epoch + i)
 			logger.log(f"loss_boundary", loss_boundary_total.detach().cpu().numpy(), epoch * params.n_batches_per_epoch + i)
+			logger.log(f"loss_diff", loss_diff_total.detach().cpu().numpy(), epoch * params.n_batches_per_epoch + i)
 
-	print(f"loss_total: {loss_total.detach().cpu().numpy().item()}, loss_domain: {loss_domain_total.detach().cpu().numpy().item()}, loss_boundary: {loss_boundary_total.detach().cpu().numpy().item()}")
+	print(f"loss_total: {loss_total.detach().cpu().numpy().item()}, loss_domain: {loss_domain_total.detach().cpu().numpy().item()}, loss_boundary: {loss_boundary_total.detach().cpu().numpy().item()}, loss_diff: {loss_diff_total.detach().cpu().numpy().item()}")
  
 	if params.log:
 		logger.save_state(model,optimizer,epoch+1)
-		

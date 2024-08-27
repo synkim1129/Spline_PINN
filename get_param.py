@@ -35,6 +35,7 @@ def params():
 	parser.add_argument('--loss_v', default=100, type=float, help='loss factor to connect dz_dt and v')
 	parser.add_argument('--loss_mean_a', default=0, type=float, help='loss factor to make mean of a small inside fluid domain')
 	parser.add_argument('--loss_mean_p', default=0, type=float, help='loss factor to make mean of p small inside fluid domain')
+	parser.add_argument('--loss_diff', default=1, type=float, help='loss factor for observation loss')
 	parser.add_argument('--border_weight', default=0, type=float, help='extra weight on fluid domain borders')
 	parser.add_argument('--lr', default=0.0001, type=float, help='learning rate of ADAM-optimizer (default: 0.0001)')
 	parser.add_argument('--clip_grad_norm', default=None, type=float, help='gradient norm clipping (default: None)')
@@ -42,10 +43,11 @@ def params():
 	parser.add_argument('--cuda', default=True, type=str2bool, help='use GPU')
 	parser.add_argument('--detach', default=False, type=str2bool, help='detach gradients in between steps (for train_wave_3)')
 	parser.add_argument('--log_loss', default=True, type=str2bool, help='logarithmic loss to "normalize" gradients')
+	parser.add_argument('--n_forcing', default=1, type=int, help='number of forcing points')
 	
 	# Network parameters
-	parser.add_argument('--net', default="Shortcut", type=str, help='network to train', choices=["Shortcut","Shortcut2","Shortcut2_residual","Shortcut4","Shortcut4_residual","Shortcut3","Fluid_model","Wave_model"])
-	parser.add_argument('--hidden_size', default=20, type=int, help='hidden size of network (default: 20)')
+	parser.add_argument('--net', default="Fluid_model", type=str, help='network to train', choices=["Shortcut","Shortcut2","Shortcut2_residual","Shortcut4","Shortcut4_residual","Shortcut3","Fluid_model","Wave_model"])
+	parser.add_argument('--hidden_size', default=50, type=int, help='hidden size of network (default: 50)')
 	parser.add_argument('--orders_v', default=2, type=int, help='spline order for velocity potential field (default: 2)')
 	parser.add_argument('--orders_p', default=2, type=int, help='spline order for pressure field (default: 2)')
 	parser.add_argument('--orders_z', default=2, type=int, help='For wave equation: spline order for z positions and velocities of membrane (default: 2)')
@@ -54,6 +56,7 @@ def params():
 	parser.add_argument('--rho', default=1, type=float, help='fluid density rho')
 	parser.add_argument('--mu', default=1, type=float, help='fluid viscosity mu')
 	parser.add_argument('--dt', default=1, type=float, help='dt per time intetgration step')
+	parser.add_argument('--ds', default=1, type=float, help='ds per space integration step')
 	
 	# Wave parameters
 	parser.add_argument('--stiffness', default=10, type=float, help='stiffness coefficient for wave equation')
@@ -72,7 +75,9 @@ def params():
 	parser.add_argument('--n_warmup_steps', default=None, type=int, help='number of warm up steps to perform when loading model in order to initialize dataset (default: None)')
 	parser.add_argument('--load_optimizer', default=False, type=str2bool, help='load state of optimizer (default: True)')
 	parser.add_argument('--load_latest', default=False, type=str2bool, help='load latest version for training (if True: leave load_date_time and load_index None. default: False)')
-	
+	parser.add_argument('--load_pretrained_date_time', default=None, type=str, help='date_time of pretrained model to load (default: None)')
+	parser.add_argument('--load_pretrained_index', default=None, type=int, help='index of pretrained model to load (default: None)')
+ 
 	# parse parameters
 	params = parser.parse_args()
 	print(f"Parameters: {vars(params)}")
@@ -80,7 +85,7 @@ def params():
 	return params
 
 def get_hyperparam_fluid(params):
-	return f"fluid net {params.net}; hs {params.hidden_size}; ov {params.orders_v}; op {params.orders_p}; mu {params.mu}; rho {params.rho}; dt {params.dt};"
+	return f"fluid net {params.net}; hs {params.hidden_size}; ov {params.orders_v}; op {params.orders_p}; mu {params.mu}; rho {params.rho}; dt {params.dt}; ds {params.ds};"
 
 def get_hyperparam_wave(params):
 	return f"wave net {params.net}; hs {params.hidden_size}; oz {params.orders_z}; stiffness {params.stiffness}; damping {params.damping}; dt {params.dt};"

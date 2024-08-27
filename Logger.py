@@ -12,6 +12,7 @@ from statsmodels.nonparametric.smoothers_lowess import lowess
 import warnings
 from natsort import natsorted
 import pickle
+import pdb
 
 class Logger():
 	
@@ -172,7 +173,6 @@ class Logger():
 		:continue_datetime: flag whether to continue on this run. Default: False
 		:return: datetime, index (helpful, if datetime / index wasn't given)
 		"""
-		
 		if datetime is None:
 			for _,dirs,_ in os.walk('Logger/{}/'.format(self.name)):
 				datetime = sorted(dirs)[-1]
@@ -241,6 +241,14 @@ class Logger():
 			dic[key] = state[key]
 		
 		return datetime, index
+
+	def save_params_to_file(self, params):
+		os.makedirs('Logger/{}/{}'.format(self.name,self.datetime),exist_ok=True)
+		filename = 'Logger/{}/{}/params.txt'.format(self.name,self.datetime)
+		with open(filename, 'w') as f:
+			f.write(f'{self.name}, {self.datetime}\n')
+			for key, value in vars(params).items():
+				f.write(f'{key}: {value}\n')
 
 
 t_start = 0

@@ -37,7 +37,7 @@ images = {"cyber":cyber_truck, "fish":fish, "smiley":smiley, "wing":wing}
 
 class Dataset():
 	
-	def __init__(self,w,h,hidden_size,resolution_factor=4,batch_size=100,n_samples=1,dataset_size=1000,average_sequence_length=5000,interactive=False,max_speed=1,brown_damping=0.9995,brown_velocity=0.005,init_velocity=0,dt=1,types=["simple"],images=["cyber","fish","smiley","wing"]):
+	def __init__(self,w,h,hidden_size,resolution_factor=4,batch_size=100,n_samples=1,dataset_size=1000,average_sequence_length=5000,interactive=False,max_speed=1,brown_damping=0.9995,brown_velocity=0.005,init_velocity=0,dt=1,types=["simple"],images=["cyber","fish","smiley","wing"], forcing=False, n_forcing=None):
 		"""
 		:w,h: width / height of grid
 		:hidden_size: size of hidden state
@@ -91,6 +91,14 @@ class Dataset():
 		self.mouse_paint = False
 		self.mouse_radius = 3
 		self.mouse_erase = False
+  
+		self.forcing = forcing
+		if self.forcing:
+			self.n_forcing = n_forcing
+			self.X = torch.zeros(dataset_size,n_forcing,dtype=torch.int64)
+			self.Y = torch.zeros(dataset_size,n_forcing,dtype=torch.int64)
+			self.v_obs = torch.zeros(dataset_size,2,w,h)
+			self.v_obs_mask = torch.zeros(dataset_size,1,w,h)
 		
 		for i in range(dataset_size):
 			self.reset_env(i)
@@ -108,6 +116,13 @@ class Dataset():
 		
 		type = np.random.choice(self.types)
 		self.env_info[index]["type"] = type
+  
+		if self.forcing:
+			self.X[index] = torch.randperm(self.w-2)[0:self.n_forcing]+1
+			self.Y[index] = torch.randperm(self.h-2)[0:self.n_forcing]+1
+			self.v_obs[index,:,:,:] = 0
+			for i in range(self.n_forcing):
+				self.v_obs_mask[index,0,self.X[index,i],self.Y[index,i]] = 1
 		
 		if type=="simple":
 			# simple obstacle
@@ -775,12 +790,17 @@ class Dataset():
 			sample_v_cond.append(self.v_cond_full_res[self.indices,:,x_offset::self.resolution_factor,y_offset::self.resolution_factor])
 			sample_v_mask.append(self.v_mask_full_res[self.indices,:,x_offset::self.resolution_factor,y_offset::self.resolution_factor])
 		
-		
-		return self.v_cond[self.indices],self.v_mask[self.indices],self.hidden_states[self.indices],grid_offsets,sample_v_cond,sample_v_mask
+		if self.forcing:
+			return self.v_cond[self.indices],self.v_mask[self.indices],self.hidden_states[self.indices],grid_offsets,sample_v_cond,sample_v_mask, self.v_obs[self.indices], self.v_mask[self.indices]
+		else:
+			return self.v_cond[self.indices],self.v_mask[self.indices],self.hidden_states[self.indices],grid_offsets,sample_v_cond,sample_v_mask
 	
-	def tell(self,hidden_state):
+	def tell(self,hidden_state,v_obs=None):
 		
 		self.hidden_states[self.indices,:,:,:] = hidden_state.detach()
+	
+		if self.forcing and (v_obs is not None):
+			self.v_obs[self.indices,:,:,:] = v_obs.detach()
 	
 		self.t += 1
 		if self.t % int(self.average_sequence_length/self.batch_size) == 0:#ca x*batch_size steps until env gets reset
